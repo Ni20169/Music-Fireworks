@@ -9,12 +9,22 @@ from pydub import AudioSegment
 # ------------------------
 WIDTH, HEIGHT = 1920, 1080
 FPS = 60
-MUSIC_FILE = r"E:\Project\烟花250831\泡沫.mp3"
+MUSIC_FILE = r"D:\Project\py\音乐烟花\泡沫.mp3"  # 音乐路径
 TEXT = "2025，你好！"
-TEXT_COLOR = (255, 255, 255)  # 白色
-TEXT_ALPHA = 128               # 透明度60%
-TEXT_FONT_SIZE = 96           # 字体大小96
-TEXT_POS_RATIO = (0.5, 0.25)  # 屏幕相对位置（左右中间，上方1/4）
+TEXT_COLOR = (255, 255, 255)
+TEXT_ALPHA = 128
+TEXT_FONT_SIZE = 96
+TEXT_POS_RATIO = (0.5, 0.25)
+MAX_FIREWORKS = 30
+
+THRESHOLD_LARGE = 5.0  # 大烟花振幅阈值
+THRESHOLD_SMALL = 1.0  # 小烟花振幅阈值
+
+# ------------------------
+# ffmpeg 配置（pydub）
+# ------------------------
+AudioSegment.converter = r"C:\ffmpeg\bin\ffmpeg.exe"
+AudioSegment.ffprobe = r"C:\ffmpeg\bin\ffprobe.exe"
 
 # ------------------------
 # 初始化
@@ -24,7 +34,6 @@ screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("音乐烟花秀")
 clock = pygame.time.Clock()
 
-# 加粗字体
 font = pygame.font.SysFont("Microsoft YaHei", TEXT_FONT_SIZE, bold=True)
 text_surface = font.render(TEXT, True, TEXT_COLOR)
 text_surface = text_surface.convert_alpha()
@@ -53,20 +62,23 @@ class Particle:
         self.y += self.dy
         self.dy += 0.05
         self.lifetime -= 1
-        self.size *= 0.96  # 渐隐效果
+        self.size *= 0.96
 
     def draw(self, surface):
         if self.lifetime > 0:
-            pygame.draw.circle(surface, self.color, (int(self.x), int(self.y)), max(1,int(self.size)))
+            pygame.draw.circle(surface, self.color,
+                               (int(self.x), int(self.y)),
+                               max(1, int(self.size)))
 
 class Firework:
-    def __init__(self, amp=1.0):
+    def __init__(self, amp=1.0, size_type='small'):
         self.x = random.randint(200, WIDTH - 200)
         self.y = HEIGHT
         self.height = random.randint(400, 800)
         self.exploded = False
         self.particles = []
         self.amp = amp
+        self.size_type = size_type
 
     def update(self):
         if not self.exploded:
@@ -80,9 +92,16 @@ class Firework:
 
     def explode(self):
         self.exploded = True
-        for _ in range(80):
+        if self.size_type == 'large':
+            particle_count = 120
+            speed_base = 5
+        else:
+            particle_count = 60
+            speed_base = 2
+
+        for _ in range(particle_count):
             angle = random.uniform(0, 2 * np.pi)
-            speed = random.uniform(2, 8) + self.amp*2
+            speed = random.uniform(speed_base, speed_base + 5)
             dx = speed * np.cos(angle)
             dy = speed * np.sin(angle)
             color = random.choice([
@@ -95,13 +114,15 @@ class Firework:
 
     def draw(self, surface):
         if not self.exploded:
-            pygame.draw.circle(surface, (255, 255, 255), (self.x, self.y), max(3,int(4*self.amp*0.6)))
+            pygame.draw.circle(surface, (255, 255, 255),
+                               (int(self.x), int(self.y)),
+                               max(3, int(4*self.amp*0.6)))
         else:
             for p in self.particles:
                 p.draw(surface)
 
 # ------------------------
-# 音乐振幅分析
+# 音乐振幅分析（安全RMS）
 # ------------------------
 audio = AudioSegment.from_mp3(MUSIC_FILE)
 samples = np.array(audio.get_array_of_samples())
@@ -109,12 +130,23 @@ if audio.channels > 1:
     samples = samples.reshape((-1, audio.channels))
 left_channel = samples[:,0]
 
+SAMPLES_PER_FRAME = int(audio.frame_rate / FPS)
+TOTAL_FRAMES = int(len(left_channel) / SAMPLES_PER_FRAME)
+
 def get_amplitude(frame):
-    start = int(frame*1024)
-    end = start + 1024
-    if end >= len(left_channel):
-        end = len(left_channel)-1
-    return np.abs(left_channel[start:end]).mean()/1000
+    start = frame * SAMPLES_PER_FRAME
+    end = start + SAMPLES_PER_FRAME
+    if start >= len(left_channel):
+        return 0
+    end = min(end, len(left_channel))
+    slice_data = left_channel[start:end]
+    if slice_data.size == 0:
+        return 0
+    slice_data = slice_data.astype(np.float32)
+    mean_sq = np.mean(slice_data**2)
+    if mean_sq <= 0:
+        return 0
+    return np.sqrt(mean_sq) / 1000
 
 # ------------------------
 # 主循环
@@ -123,30 +155,32 @@ fireworks = []
 frame_count = 0
 running = True
 
-while running:
+while running and frame_count < TOTAL_FRAMES:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
-        elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                running = False
+        elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            running = False
 
     screen.fill((0, 0, 0))
 
     amp = get_amplitude(frame_count)
 
-    # 创建烟花
-    if random.random() < min(0.05 + amp/50, 0.2):
-        fireworks.append(Firework(amp=amp))
+    # 根据振幅触发烟花
+    if amp >= THRESHOLD_LARGE and len(fireworks) < MAX_FIREWORKS:
+        fireworks.append(Firework(amp=amp, size_type='large'))
+    elif amp >= THRESHOLD_SMALL and len(fireworks) < MAX_FIREWORKS:
+        fireworks.append(Firework(amp=amp, size_type='small'))
 
-    # 更新绘制烟花
     for fw in fireworks:
         fw.update()
         fw.draw(screen)
-    fireworks = [fw for fw in fireworks if not (fw.exploded and len(fw.particles)==0)]
+    fireworks = [fw for fw in fireworks if not (fw.exploded and len(fw.particles) == 0)]
 
     # 绘制文字
     screen.blit(text_surface, text_rect)
+
+   
 
     pygame.display.flip()
     clock.tick(FPS)
